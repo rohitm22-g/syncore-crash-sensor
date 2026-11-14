@@ -9,7 +9,16 @@ import { simulationService } from './simulationService';
 class DataService {
   constructor() {
     this.source = 'DEMO'; // 'DEMO' or 'LIVE'
-    this.connectionState = 'connected'; // 'connected', 'connecting', 'disconnected', 'demo'
+    this.connectionState = 'connected'; // 'connected', 'connecting', 'disconnected', 'error', 'demo'
+    this.hardwareStatus = {
+      state: 'DISCONNECTED',
+      port: 'COM5',
+      baud_rate: 115200,
+      error_message: null,
+      packets_received: 0,
+      invalid_packets: 0
+    };
+
     this.telemetrySubscribers = new Set();
     this.eventSubscribers = new Set();
     this.connectionSubscribers = new Set();
@@ -59,7 +68,6 @@ class DataService {
       // Ignore storage errors
     }
 
-    // Seed realistic prototype events so the user immediately has data to review
     return [
       {
         id: 'EVT-1001',
@@ -129,7 +137,8 @@ class DataService {
     this.connectionSubscribers.add(callback);
     callback({
       source: this.source,
-      state: this.source === 'DEMO' ? 'demo' : this.connectionState
+      state: this.source === 'DEMO' ? 'demo' : this.connectionState,
+      hardwareStatus: this.hardwareStatus
     });
     return () => this.connectionSubscribers.delete(callback);
   }
@@ -137,7 +146,8 @@ class DataService {
   notifyConnection() {
     const payload = {
       source: this.source,
-      state: this.source === 'DEMO' ? 'demo' : this.connectionState
+      state: this.source === 'DEMO' ? 'demo' : this.connectionState,
+      hardwareStatus: this.hardwareStatus
     };
     this.connectionSubscribers.forEach((cb) => cb(payload));
   }
@@ -155,6 +165,12 @@ class DataService {
       this.startSimulation();
     } else {
       this.stopSimulation();
+      // Reset live telemetry baseline without generating fake motion
+      this.latestTelemetry = {
+        ...this.latestTelemetry,
+        status: 'STANDBY',
+        is_simulated: false
+      };
       this.connectWebSocket();
     }
     this.notifyConnection();
@@ -220,7 +236,7 @@ class DataService {
 
   recordEvent(evt) {
     const newEvent = {
-      id: `EVT-${Date.now().toString().slice(-4)}`,
+      id: evt.id || `EVT-${Date.now().toString().slice(-4)}`,
       ...evt,
       timestamp: evt.timestamp || new Date().toISOString()
     };
@@ -239,7 +255,6 @@ class DataService {
       }
     });
 
-    // If connected to backend, optionally sync to SQLite
     if (this.source === 'LIVE') {
       this.syncEventToBackend(newEvent);
     }
@@ -262,7 +277,6 @@ class DataService {
     if (this.source === 'DEMO') {
       const resetEvt = simulationService.resetAlarm();
       this.recordEvent(resetEvt);
-      // Immediately refresh telemetry alarm flag
       this.latestTelemetry.alarm = false;
       this.latestTelemetry.motion_alert = false;
       this.latestTelemetry.tilt_alert = false;
@@ -302,8 +316,12 @@ class DataService {
   updateThresholds(newThresholds) {
     if (this.source === 'DEMO') {
       simulationService.setThresholds(newThresholds);
-    } else if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ command: 'SET_THRESHOLDS', thresholds: newThresholds }));
+    } else {
+      fetch('http://localhost:8000/api/device/thresholds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newThresholds)
+      }).catch(err => console.error("Error updating thresholds:", err));
     }
   }
 
@@ -323,7 +341,6 @@ class DataService {
       });
       return res;
     } else {
-      // In live mode send calibrate command to backend
       const res = await fetch('http://localhost:8000/api/device/calibrate', { method: 'POST' });
       return await res.json();
     }
@@ -337,6 +354,51 @@ class DataService {
     this.eventHistory = [];
     this.saveEvents();
     this.eventSubscribers.forEach((cb) => cb(null, []));
+    if (this.source === 'LIVE') {
+      fetch('http://localhost:8000/api/events', { method: 'DELETE' }).catch(() => {});
+    }
+  }
+
+  // --- Hardware Management REST calls ---
+  async fetchAvailablePorts() {
+    try {
+      const res = await fetch('http://localhost:8000/api/ports');
+      return await res.json();
+    } catch {
+      return [{ port: 'COM5', desc: 'Silicon Labs CP210x USB to UART Bridge (COM5)' }];
+    }
+  }
+
+  async connectHardware(port = 'COM5', baudRate = 115200) {
+    try {
+      const res = await fetch('http://localhost:8000/api/device/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ port, baud_rate: parseInt(baudRate, 10), auto_reconnect: true })
+      });
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      return { status: 'error', message: err.message };
+    }
+  }
+
+  async disconnectHardware() {
+    try {
+      const res = await fetch('http://localhost:8000/api/device/disconnect', { method: 'POST' });
+      return await res.json();
+    } catch (err) {
+      return { status: 'error', message: err.message };
+    }
+  }
+
+  async fetchDeviceStatus() {
+    try {
+      const res = await fetch('http://localhost:8000/api/device/status');
+      return await res.json();
+    } catch {
+      return this.hardwareStatus;
+    }
   }
 
   // --- WebSocket Connection ---
@@ -363,24 +425,40 @@ class DataService {
             this.handleIncomingTelemetry(data.payload);
           } else if (data.type === 'event') {
             this.recordEvent(data.payload);
+          } else if (data.type === 'connection_status') {
+            this.hardwareStatus = data.payload;
+            if (data.payload.state === 'CONNECTED') {
+              this.connectionState = 'connected';
+            } else if (data.payload.state === 'ERROR') {
+              this.connectionState = 'error';
+            } else {
+              this.connectionState = 'disconnected';
+            }
+            this.notifyConnection();
           }
         } catch (err) {
-          console.error('Error parsing incoming WebSocket telemetry:', err);
+          console.error('Error parsing incoming WebSocket message:', err);
         }
       };
 
       this.socket.onclose = () => {
-        this.connectionState = 'disconnected';
-        this.notifyConnection();
+        if (this.source === 'LIVE') {
+          this.connectionState = 'disconnected';
+          this.notifyConnection();
+        }
       };
 
       this.socket.onerror = () => {
-        this.connectionState = 'disconnected';
-        this.notifyConnection();
+        if (this.source === 'LIVE') {
+          this.connectionState = 'error';
+          this.notifyConnection();
+        }
       };
     } catch {
-      this.connectionState = 'disconnected';
-      this.notifyConnection();
+      if (this.source === 'LIVE') {
+        this.connectionState = 'error';
+        this.notifyConnection();
+      }
     }
   }
 }

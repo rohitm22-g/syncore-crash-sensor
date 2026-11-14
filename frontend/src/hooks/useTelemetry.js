@@ -7,7 +7,8 @@ export function useTelemetry() {
   const [events, setEvents] = useState(dataService.getEventHistory());
   const [connection, setConnection] = useState({
     source: dataService.source,
-    state: dataService.source === 'DEMO' ? 'demo' : dataService.connectionState
+    state: dataService.source === 'DEMO' ? 'demo' : dataService.connectionState,
+    hardwareStatus: dataService.hardwareStatus
   });
 
   useEffect(() => {
@@ -39,6 +40,10 @@ export function useTelemetry() {
   const calibrate = useCallback(() => dataService.calibrate(), []);
   const setDataSource = useCallback((src) => dataService.setDataSource(src), []);
   const clearEventHistory = useCallback(() => dataService.clearEventHistory(), []);
+  const fetchAvailablePorts = useCallback(() => dataService.fetchAvailablePorts(), []);
+  const connectHardware = useCallback((port, baud) => dataService.connectHardware(port, baud), []);
+  const disconnectHardware = useCallback(() => dataService.disconnectHardware(), []);
+  const fetchDeviceStatus = useCallback(() => dataService.fetchDeviceStatus(), []);
 
   return {
     telemetry,
@@ -52,6 +57,10 @@ export function useTelemetry() {
     updateThresholds,
     calibrate,
     setDataSource,
-    clearEventHistory
+    clearEventHistory,
+    fetchAvailablePorts,
+    connectHardware,
+    disconnectHardware,
+    fetchDeviceStatus
   };
 }

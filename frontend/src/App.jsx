@@ -22,7 +22,11 @@ export function App() {
     updateThresholds,
     calibrate,
     setDataSource,
-    clearEventHistory
+    clearEventHistory,
+    fetchAvailablePorts,
+    connectHardware,
+    disconnectHardware,
+    fetchDeviceStatus
   } = useTelemetry();
 
   return (
@@ -80,6 +84,10 @@ export function App() {
           onUpdateThresholds={updateThresholds}
           onCalibrate={calibrate}
           onToggleDataSource={setDataSource}
+          onFetchAvailablePorts={fetchAvailablePorts}
+          onConnectHardware={connectHardware}
+          onDisconnectHardware={disconnectHardware}
+          onFetchDeviceStatus={fetchDeviceStatus}
         />
       )}
     </MainLayout>

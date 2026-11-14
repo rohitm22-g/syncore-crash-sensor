@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Settings,
   Cpu,
@@ -11,7 +11,8 @@ import {
   Power,
   Shield,
   Wifi,
-  Lock
+  Lock,
+  Activity
 } from 'lucide-react';
 import { StatusBadge } from '../components/StatusBadge';
 
@@ -21,14 +22,20 @@ export function DeviceSettingsPage({
   onSetMonitoringStatus,
   onUpdateThresholds,
   onCalibrate,
-  onToggleDataSource
+  onToggleDataSource,
+  onFetchAvailablePorts,
+  onConnectHardware,
+  onDisconnectHardware,
+  onFetchDeviceStatus
 }) {
   // Serial settings
-  const [selectedPort, setSelectedPort] = useState('COM4');
+  const [selectedPort, setSelectedPort] = useState('COM5');
   const [baudRate, setBaudRate] = useState('115200');
-  const [availablePorts, setAvailablePorts] = useState(['COM3 (USB-Serial CH340)', 'COM4 (Silicon Labs CP210x)', 'COM7 (ESP32-S3 JTAG)']);
+  const [availablePorts, setAvailablePorts] = useState([
+    { port: 'COM5', desc: 'Silicon Labs CP210x USB to UART Bridge (COM5)' }
+  ]);
   const [isScanningPorts, setIsScanningPorts] = useState(false);
-  const [connectedState, setConnectedState] = useState(connection.source === 'DEMO' ? 'demo' : 'disconnected');
+  const [connectionFeedback, setConnectionFeedback] = useState('');
 
   // Threshold draft settings
   const [linearAccelThreshold, setLinearAccelThreshold] = useState(2.5);
@@ -41,17 +48,58 @@ export function DeviceSettingsPage({
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [calibFeedback, setCalibFeedback] = useState('');
 
+  // Auto-scan ports on load
+  useEffect(() => {
+    handleScanPorts();
+  }, []);
+
   // Port scan
-  const handleScanPorts = () => {
+  const handleScanPorts = async () => {
     setIsScanningPorts(true);
-    setTimeout(() => {
-      setAvailablePorts([
-        'COM3 (USB-Serial CH340)',
-        'COM4 (Silicon Labs CP210x)',
-        'COM7 (ESP32-S3 JTAG)'
-      ]);
+    try {
+      if (onFetchAvailablePorts) {
+        const ports = await onFetchAvailablePorts();
+        if (Array.isArray(ports) && ports.length > 0) {
+          setAvailablePorts(ports);
+          // If COM5 or Silicon Labs CP210x is found, pick it
+          const cp210x = ports.find((p) => (p.port === 'COM5' || (p.desc && p.desc.includes('CP210x'))));
+          if (cp210x) {
+            setSelectedPort(cp210x.port);
+          } else if (ports[0]) {
+            setSelectedPort(ports[0].port);
+          }
+        }
+      }
+    } catch {
+      // Keep defaults
+    } finally {
       setIsScanningPorts(false);
-    }, 600);
+    }
+  };
+
+  const handleConnectHardware = async () => {
+    setConnectionFeedback('Initiating PySerial communication on ' + selectedPort + '...');
+    if (onConnectHardware) {
+      const res = await onConnectHardware(selectedPort, baudRate);
+      if (res?.status === 'error') {
+        setConnectionFeedback(res.message || 'Error connecting to port.');
+      } else {
+        setConnectionFeedback(res?.message || 'Connected to ' + selectedPort);
+        onToggleDataSource('LIVE');
+      }
+      setTimeout(() => setConnectionFeedback(''), 5000);
+    } else {
+      onToggleDataSource('LIVE');
+    }
+  };
+
+  const handleDisconnectHardware = async () => {
+    if (onDisconnectHardware) {
+      await onDisconnectHardware();
+    }
+    onToggleDataSource('DEMO');
+    setConnectionFeedback('Hardware disconnected. Returned to DEMO MODE.');
+    setTimeout(() => setConnectionFeedback(''), 4000);
   };
 
   // Calibration
@@ -81,6 +129,10 @@ export function DeviceSettingsPage({
     setTimeout(() => setSyncFeedback(''), 4000);
   };
 
+  const hwState = connection?.hardwareStatus?.state || 'DISCONNECTED';
+  const hwError = connection?.hardwareStatus?.error_message;
+  const isHardwareActive = connection.source === 'LIVE' && hwState === 'CONNECTED';
+
   return (
     <div className="space-y-6">
       {/* Page Header */}
@@ -102,8 +154,8 @@ export function DeviceSettingsPage({
 
         <div className="flex items-center gap-2">
           <StatusBadge
-            type={connection.source === 'DEMO' ? 'warning' : 'normal'}
-            label={connection.source === 'DEMO' ? 'DEMO MODE' : 'HARDWARE SERIAL'}
+            type={connection.source === 'DEMO' ? 'warning' : hwState === 'CONNECTED' ? 'normal' : 'alarm'}
+            label={connection.source === 'DEMO' ? 'DEMO MODE' : `HARDWARE ${hwState}`}
           />
         </div>
       </div>
@@ -124,11 +176,30 @@ export function DeviceSettingsPage({
           </div>
           <span className="text-xs font-mono text-slate-400 hidden sm:inline">
             Status:{' '}
-            <strong className={connection.source === 'DEMO' ? 'text-amber-400' : 'text-emerald-400'}>
-              {connection.source === 'DEMO' ? 'SIMULATOR ACTIVE' : 'SERIAL READY'}
+            <strong
+              className={
+                connection.source === 'DEMO'
+                  ? 'text-amber-400'
+                  : hwState === 'CONNECTED'
+                  ? 'text-emerald-400'
+                  : 'text-rose-400'
+              }
+            >
+              {connection.source === 'DEMO' ? 'SIMULATOR ACTIVE' : hwState}
             </strong>
           </span>
         </div>
+
+        {/* Hardware Status Display Banner */}
+        {connection.source === 'LIVE' && hwError && (
+          <div className="mb-4 bg-rose-950/40 border border-rose-500/50 rounded-lg p-3 text-xs font-mono text-rose-300 flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold block uppercase tracking-wider">Serial Connection Notice:</span>
+              <p className="mt-0.5 text-rose-200/90">{hwError}</p>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Port Selection */}
@@ -142,11 +213,15 @@ export function DeviceSettingsPage({
                 onChange={(e) => setSelectedPort(e.target.value)}
                 className="w-full bg-black/40 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500"
               >
-                {availablePorts.map((p) => (
-                  <option key={p} value={p.split(' ')[0]}>
-                    {p}
-                  </option>
-                ))}
+                {availablePorts.map((p) => {
+                  const portName = typeof p === 'string' ? p.split(' ')[0] : p.port;
+                  const portDesc = typeof p === 'string' ? p : `${p.port} (${p.desc || 'Serial Device'})`;
+                  return (
+                    <option key={portName} value={portName}>
+                      {portDesc}
+                    </option>
+                  );
+                })}
               </select>
               <button
                 onClick={handleScanPorts}
@@ -168,7 +243,7 @@ export function DeviceSettingsPage({
               onChange={(e) => setBaudRate(e.target.value)}
               className="w-full bg-black/40 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500"
             >
-              <option value="115200">115200 baud (Recommended for MPU6050)</option>
+              <option value="115200">115200 baud (ESP32 Standard)</option>
               <option value="9600">9600 baud</option>
               <option value="57600">57600 baud</option>
               <option value="230400">230400 baud (High throughput)</option>
@@ -181,30 +256,63 @@ export function DeviceSettingsPage({
               Hardware Bus Control
             </label>
             <div className="flex gap-2">
-              <button
-                onClick={() => onToggleDataSource(connection.source === 'DEMO' ? 'LIVE' : 'DEMO')}
-                className={`w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition cursor-pointer ${
-                  connection.source === 'LIVE'
-                    ? 'bg-rose-950/60 border border-rose-500/50 text-rose-300 hover:bg-rose-900/60'
-                    : 'bg-emerald-950/60 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60'
-                }`}
-              >
-                <Power className="w-3.5 h-3.5" />
-                {connection.source === 'LIVE' ? 'Disconnect Hardware' : 'Connect ESP32 (Live)'}
-              </button>
+              {isHardwareActive ? (
+                <button
+                  onClick={handleDisconnectHardware}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition cursor-pointer bg-rose-950/60 border border-rose-500/50 text-rose-300 hover:bg-rose-900/60"
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  Disconnect Hardware
+                </button>
+              ) : (
+                <button
+                  onClick={handleConnectHardware}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition cursor-pointer bg-emerald-950/60 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60"
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  Connect ESP32 (Live)
+                </button>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Future Wi-Fi Ready Note */}
-        <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono text-slate-400">
-          <div className="flex items-center gap-2">
-            <Wifi className="w-4 h-4 text-cyan-400" />
+        {connectionFeedback && (
+          <div className="mt-3 bg-slate-900/80 border border-slate-700 rounded-lg p-2.5 text-xs font-mono text-slate-300">
+            {connectionFeedback}
+          </div>
+        )}
+
+        {/* Live Hardware Packet Stats */}
+        {connection.source === 'LIVE' && (
+          <div className="mt-4 pt-3 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+            <div className="bg-black/30 p-2 rounded border border-white/5">
+              <span className="text-slate-500 text-[10px] block uppercase">Packets Received</span>
+              <span className="text-emerald-400 font-bold">{connection.hardwareStatus?.packets_received ?? 0}</span>
+            </div>
+            <div className="bg-black/30 p-2 rounded border border-white/5">
+              <span className="text-slate-500 text-[10px] block uppercase">Invalid / Dropped</span>
+              <span className="text-slate-400">{connection.hardwareStatus?.invalid_packets ?? 0}</span>
+            </div>
+            <div className="bg-black/30 p-2 rounded border border-white/5">
+              <span className="text-slate-500 text-[10px] block uppercase">Active Port</span>
+              <span className="text-cyan-400 font-bold">{connection.hardwareStatus?.port || selectedPort}</span>
+            </div>
+            <div className="bg-black/30 p-2 rounded border border-white/5">
+              <span className="text-slate-500 text-[10px] block uppercase">Baud Rate</span>
+              <span className="text-slate-300">{connection.hardwareStatus?.baud_rate || baudRate}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Note on Arduino Serial Monitor */}
+        <div className="mt-4 pt-3 border-t border-slate-800/80 text-xs font-mono text-slate-400">
+          <div className="flex items-start gap-2">
+            <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
             <span>
-              <strong>Modular Protocol Layer:</strong> USB PySerial abstraction layer can be hot-swapped for ESP32 Wi-Fi / MQTT socket telemetry without changing frontend code.
+              <strong>Serial Port Exclusive Access:</strong> Windows allows only one application to open {selectedPort} at a time. If the Arduino IDE Serial Monitor or VS Code Serial Monitor is open, close it before clicking <strong>Connect ESP32 (Live)</strong>.
             </span>
           </div>
-          <span className="text-slate-500 hidden md:inline">Protocol: JSON Telemetry Stream</span>
         </div>
       </div>
 
@@ -234,7 +342,7 @@ export function DeviceSettingsPage({
               Ensure the ESP32 vehicle test node is placed on a <strong>stationary horizontal surface</strong> before executing zero-offset calibration.
             </p>
             <p className="text-slate-400">
-              Samples 500 consecutive readings to compute zero-G offset registers for Ax, Ay, Gx, Gy, Gz.
+              Samples consecutive readings to compute zero-G offset registers for Ax, Ay, Gx, Gy, Gz.
             </p>
           </div>
 
